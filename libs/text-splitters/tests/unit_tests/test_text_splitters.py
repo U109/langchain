@@ -5,11 +5,9 @@ from __future__ import annotations
 import random
 import re
 import string
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from bs4 import Tag
 from langchain_core._api import suppress_langchain_beta_warning
 from langchain_core.documents import Document
 
@@ -33,6 +31,11 @@ from langchain_text_splitters.markdown import (
     MarkdownHeaderTextSplitter,
 )
 from langchain_text_splitters.python import PythonCodeTextSplitter
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from bs4 import Tag
 
 FAKE_PYTHON_TEXT = """
 class Foo:
@@ -2370,7 +2373,7 @@ def test_haskell_code_splitter() -> None:
 def html_header_splitter_splitter_factory() -> Callable[
     [list[tuple[str, str]]], HTMLHeaderTextSplitter
 ]:
-    """Fixture to create an HTMLHeaderTextSplitter instance with given headers.
+    """Fixture to create an `HTMLHeaderTextSplitter` instance with given headers.
 
     This factory allows dynamic creation of splitters with different headers.
     """
@@ -2740,7 +2743,7 @@ def test_additional_html_header_text_splitter(
             header splitter.
         headers_to_split_on: List of headers to split on.
         html_content: HTML content to be split.
-        expected_output: Expected list of Document objects.
+        expected_output: Expected list of `Document` objects.
         test_case: Description of the test case.
 
     Raises:
@@ -2812,7 +2815,7 @@ def test_html_no_headers_with_multiple_splitters(
             splitter.
         headers_to_split_on: List of headers to split on.
         html_content: HTML content to be split.
-        expected_output: Expected list of Document objects after splitting.
+        expected_output: Expected list of `Document` objects after splitting.
         test_case: Description of the test case.
 
     Raises:

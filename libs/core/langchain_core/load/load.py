@@ -61,18 +61,17 @@ class Reviver:
         """Initialize the reviver.
 
         Args:
-            secrets_map: A map of secrets to load. If a secret is not found in
-                the map, it will be loaded from the environment if `secrets_from_env`
-                is True.
+            secrets_map: A map of secrets to load.
+
+                If a secret is not found in the map, it will be loaded from the
+                environment if `secrets_from_env` is `True`.
             valid_namespaces: A list of additional namespaces (modules)
                 to allow to be deserialized.
             secrets_from_env: Whether to load secrets from the environment.
-                Defaults to `True`.
             additional_import_mappings: A dictionary of additional namespace mappings
-                You can use this to override default mappings or add new mappings.
 
+                You can use this to override default mappings or add new mappings.
             ignore_unserializable_fields: Whether to ignore unserializable fields.
-                Defaults to `False`.
         """
         self.secrets_from_env = secrets_from_env
         self.secrets_map = secrets_map or {}
@@ -198,18 +197,17 @@ def loads(
 
     Args:
         text: The string to load.
-        secrets_map: A map of secrets to load. If a secret is not found in
-            the map, it will be loaded from the environment if `secrets_from_env`
-            is True.
+        secrets_map: A map of secrets to load.
+
+            If a secret is not found in the map, it will be loaded from the environment
+            if `secrets_from_env` is `True`.
         valid_namespaces: A list of additional namespaces (modules)
             to allow to be deserialized.
         secrets_from_env: Whether to load secrets from the environment.
-            Defaults to `True`.
         additional_import_mappings: A dictionary of additional namespace mappings
-            You can use this to override default mappings or add new mappings.
 
+            You can use this to override default mappings or add new mappings.
         ignore_unserializable_fields: Whether to ignore unserializable fields.
-            Defaults to `False`.
 
     Returns:
         Revived LangChain objects.
@@ -243,18 +241,17 @@ def load(
 
     Args:
         obj: The object to load.
-        secrets_map: A map of secrets to load. If a secret is not found in
-            the map, it will be loaded from the environment if `secrets_from_env`
-            is True.
+        secrets_map: A map of secrets to load.
+
+            If a secret is not found in the map, it will be loaded from the environment
+            if `secrets_from_env` is `True`.
         valid_namespaces: A list of additional namespaces (modules)
             to allow to be deserialized.
         secrets_from_env: Whether to load secrets from the environment.
-            Defaults to `True`.
         additional_import_mappings: A dictionary of additional namespace mappings
-            You can use this to override default mappings or add new mappings.
 
+            You can use this to override default mappings or add new mappings.
         ignore_unserializable_fields: Whether to ignore unserializable fields.
-            Defaults to `False`.
 
     Returns:
         Revived LangChain objects.

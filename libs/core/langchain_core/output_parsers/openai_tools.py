@@ -15,7 +15,11 @@ from langchain_core.messages.tool import tool_call as create_tool_call
 from langchain_core.output_parsers.transform import BaseCumulativeTransformOutputParser
 from langchain_core.outputs import ChatGeneration, Generation
 from langchain_core.utils.json import parse_partial_json
-from langchain_core.utils.pydantic import TypeBaseModel
+from langchain_core.utils.pydantic import (
+    TypeBaseModel,
+    is_pydantic_v1_subclass,
+    is_pydantic_v2_subclass,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +35,9 @@ def parse_tool_call(
 
     Args:
         raw_tool_call: The raw tool call to parse.
-        partial: Whether to parse partial JSON. Default is False.
+        partial: Whether to parse partial JSON.
         strict: Whether to allow non-JSON-compliant strings.
-            Default is False.
-        return_id: Whether to return the tool call id. Default is True.
+        return_id: Whether to return the tool call id.
 
     Returns:
         The parsed tool call.
@@ -105,10 +108,9 @@ def parse_tool_calls(
 
     Args:
         raw_tool_calls: The raw tool calls to parse.
-        partial: Whether to parse partial JSON. Default is False.
+        partial: Whether to parse partial JSON.
         strict: Whether to allow non-JSON-compliant strings.
-            Default is False.
-        return_id: Whether to return the tool call id. Default is True.
+        return_id: Whether to return the tool call id.
 
     Returns:
         The parsed tool calls.
@@ -165,7 +167,6 @@ class JsonOutputToolsParser(BaseCumulativeTransformOutputParser[Any]):
                 If `True`, the output will be a JSON object containing
                 all the keys that have been returned so far.
                 If `False`, the output will be the full JSON object.
-                Default is False.
 
         Returns:
             The parsed tool calls.
@@ -227,9 +228,8 @@ class JsonOutputKeyToolsParser(JsonOutputToolsParser):
             result: The result of the LLM call.
             partial: Whether to parse partial JSON.
                 If `True`, the output will be a JSON object containing
-                all the keys that have been returned so far.
+                    all the keys that have been returned so far.
                 If `False`, the output will be the full JSON object.
-                Default is False.
 
         Raises:
             OutputParserException: If the generation is not a chat generation.
@@ -311,9 +311,8 @@ class PydanticToolsParser(JsonOutputToolsParser):
             result: The result of the LLM call.
             partial: Whether to parse partial JSON.
                 If `True`, the output will be a JSON object containing
-                all the keys that have been returned so far.
+                    all the keys that have been returned so far.
                 If `False`, the output will be the full JSON object.
-                Default is False.
 
         Returns:
             The parsed Pydantic objects.
@@ -328,7 +327,15 @@ class PydanticToolsParser(JsonOutputToolsParser):
             return None if self.first_tool_only else []
 
         json_results = [json_results] if self.first_tool_only else json_results
-        name_dict = {tool.__name__: tool for tool in self.tools}
+        name_dict_v2: dict[str, TypeBaseModel] = {
+            tool.model_config.get("title") or tool.__name__: tool
+            for tool in self.tools
+            if is_pydantic_v2_subclass(tool)
+        }
+        name_dict_v1: dict[str, TypeBaseModel] = {
+            tool.__name__: tool for tool in self.tools if is_pydantic_v1_subclass(tool)
+        }
+        name_dict: dict[str, TypeBaseModel] = {**name_dict_v2, **name_dict_v1}
         pydantic_objects = []
         for res in json_results:
             if not isinstance(res["args"], dict):

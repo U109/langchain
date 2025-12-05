@@ -6,6 +6,7 @@ import sys
 import textwrap
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from functools import partial
@@ -55,6 +56,7 @@ from langchain_core.tools.base import (
     InjectedToolArg,
     InjectedToolCallId,
     SchemaAnnotationError,
+    _DirectlyInjectedToolArg,
     _is_message_content_block,
     _is_message_content_type,
     get_all_basemodel_annotations,
@@ -68,7 +70,14 @@ from langchain_core.utils.pydantic import (
     create_model_v2,
 )
 from tests.unit_tests.fake.callbacks import FakeCallbackHandler
-from tests.unit_tests.pydantic_utils import _schema
+from tests.unit_tests.pydantic_utils import _normalize_schema, _schema
+
+try:
+    from langgraph.prebuilt import ToolRuntime  # type: ignore[import-not-found]
+
+    HAS_LANGGRAPH = True
+except ImportError:
+    HAS_LANGGRAPH = False
 
 
 def _get_tool_call_json_schema(tool: BaseTool) -> dict:
@@ -98,14 +107,6 @@ def test_unnamed_decorator() -> None:
 
 
 class _MockSchema(BaseModel):
-    """Return the arguments directly."""
-
-    arg1: int
-    arg2: bool
-    arg3: dict | None = None
-
-
-class _MockSchemaV1(BaseModelV1):
     """Return the arguments directly."""
 
     arg1: int
@@ -206,6 +207,21 @@ def test_decorator_with_specified_schema() -> None:
     assert isinstance(tool_func, BaseTool)
     assert tool_func.args_schema == _MockSchema
 
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 14),
+    reason="pydantic.v1 namespace not supported with Python 3.14+",
+)
+def test_decorator_with_specified_schema_pydantic_v1() -> None:
+    """Test that manually specified schemata are passed through to the tool."""
+
+    class _MockSchemaV1(BaseModelV1):
+        """Return the arguments directly."""
+
+        arg1: int
+        arg2: bool
+        arg3: dict | None = None
+
     @tool(args_schema=cast("ArgsSchema", _MockSchemaV1))
     def tool_func_v1(*, arg1: int, arg2: bool, arg3: dict | None = None) -> str:
         return f"{arg1} {arg2} {arg3}"
@@ -229,7 +245,7 @@ def test_decorated_function_schema_equivalent() -> None:
     assert (
         _schema(structured_tool_input.args_schema)["properties"]
         == _schema(_MockSchema)["properties"]
-        == structured_tool_input.args
+        == _normalize_schema(structured_tool_input.args)
     )
 
 
@@ -348,6 +364,10 @@ def test_structured_tool_types_parsed() -> None:
     assert result == expected
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 14),
+    reason="pydantic.v1 namespace not supported with Python 3.14+",
+)
 def test_structured_tool_types_parsed_pydantic_v1() -> None:
     """Test the non-primitive types are correctly passed to structured tools."""
 
@@ -1287,7 +1307,7 @@ def test_docstring_parsing() -> None:
     assert args_schema2["description"] == "The foo. Additional description here."
     assert args_schema2["properties"] == expected["properties"]
 
-    # Multi-line wth Returns block
+    # Multi-line with Returns block
     def foo3(bar: str, baz: int) -> str:
         """The foo.
 
@@ -1880,7 +1900,10 @@ def generate_backwards_compatible_v1() -> list[Any]:
 # behave well with either pydantic 1 proper,
 # pydantic v1 from pydantic 2,
 # or pydantic 2 proper.
-TEST_MODELS = generate_models() + generate_backwards_compatible_v1()
+TEST_MODELS = generate_models()
+
+if sys.version_info < (3, 14):
+    TEST_MODELS += generate_backwards_compatible_v1()
 
 
 @pytest.mark.parametrize("pydantic_model", TEST_MODELS)
@@ -2079,6 +2102,8 @@ def test__get_all_basemodel_annotations_v2(*, use_v1_namespace: bool) -> None:
     A = TypeVar("A")
 
     if use_v1_namespace:
+        if sys.version_info >= (3, 14):
+            pytest.skip("pydantic.v1 namespace not supported with Python 3.14+")
 
         class ModelA(BaseModelV1, Generic[A], extra="allow"):
             a: A
@@ -2306,6 +2331,105 @@ def test_injected_arg_with_complex_type() -> None:
         return foo.value
 
     assert injected_tool.invoke({"x": 5, "foo": Foo()}) == "bar"
+
+
+@pytest.mark.parametrize("schema_format", ["model", "json_schema"])
+def test_tool_allows_extra_runtime_args_with_custom_schema(
+    schema_format: Literal["model", "json_schema"],
+) -> None:
+    """Ensure runtime args are preserved even if not in the args schema."""
+
+    class InputSchema(BaseModel):
+        query: str
+
+    captured: dict[str, Any] = {}
+
+    @dataclass
+    class MyRuntime(_DirectlyInjectedToolArg):
+        some_obj: object
+
+    args_schema = (
+        InputSchema if schema_format == "model" else InputSchema.model_json_schema()
+    )
+
+    @tool(args_schema=args_schema)
+    def runtime_tool(query: str, runtime: MyRuntime) -> str:
+        """Echo the query and capture runtime value."""
+        captured["runtime"] = runtime
+        return query
+
+    runtime_obj = object()
+    runtime = MyRuntime(some_obj=runtime_obj)
+    assert runtime_tool.invoke({"query": "hello", "runtime": runtime}) == "hello"
+    assert captured["runtime"] is runtime
+
+
+def test_tool_injected_tool_call_id_with_custom_schema() -> None:
+    """Ensure InjectedToolCallId works with custom args schema."""
+
+    class InputSchema(BaseModel):
+        x: int
+
+    @tool(args_schema=InputSchema)
+    def injected_tool(
+        x: int, tool_call_id: Annotated[str, InjectedToolCallId]
+    ) -> ToolMessage:
+        """Tool with injected tool_call_id and custom schema."""
+        return ToolMessage(str(x), tool_call_id=tool_call_id)
+
+    # Test that tool_call_id is properly injected even though not in custom schema
+    result = injected_tool.invoke(
+        {
+            "type": "tool_call",
+            "args": {"x": 42},
+            "name": "injected_tool",
+            "id": "test_call_id",
+        }
+    )
+    assert result == ToolMessage("42", tool_call_id="test_call_id")
+
+    # Test that it still raises error when invoked without a ToolCall
+    with pytest.raises(
+        ValueError,
+        match="When tool includes an InjectedToolCallId argument, "
+        "tool must always be invoked with a full model ToolCall",
+    ):
+        injected_tool.invoke({"x": 42})
+
+    # Test that tool_call_id can be passed directly in input dict
+    result = injected_tool.invoke({"x": 42, "tool_call_id": "direct_id"})
+    assert result == ToolMessage("42", tool_call_id="direct_id")
+
+
+def test_tool_injected_arg_with_custom_schema() -> None:
+    """Ensure InjectedToolArg works with custom args schema."""
+
+    class InputSchema(BaseModel):
+        query: str
+
+    class CustomContext:
+        """Custom context object to be injected."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    captured: dict[str, Any] = {}
+
+    @tool(args_schema=InputSchema)
+    def search_tool(
+        query: str, context: Annotated[CustomContext, InjectedToolArg]
+    ) -> str:
+        """Search with custom context."""
+        captured["context"] = context
+        return f"Results for {query} with context {context.value}"
+
+    # Test that context is properly injected even though not in custom schema
+    ctx = CustomContext("test_context")
+    result = search_tool.invoke({"query": "hello", "context": ctx})
+
+    assert result == "Results for hello with context test_context"
+    assert captured["context"] is ctx
+    assert captured["context"].value == "test_context"
 
 
 def test_tool_injected_tool_call_id() -> None:
@@ -2757,3 +2881,249 @@ def test_tool_args_schema_with_annotated_type() -> None:
             "type": "array",
         }
     }
+
+
+class CallbackHandlerWithInputCapture(FakeCallbackHandler):
+    """Callback handler that captures inputs passed to on_tool_start."""
+
+    captured_inputs: list[dict | None] = []
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str,
+        *,
+        run_id: Any,
+        parent_run_id: Any | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        inputs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Capture the inputs passed to on_tool_start."""
+        self.captured_inputs.append(inputs)
+        return super().on_tool_start(
+            serialized,
+            input_str,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            tags=tags,
+            metadata=metadata,
+            inputs=inputs,
+            **kwargs,
+        )
+
+
+def test_filter_injected_args_from_callbacks() -> None:
+    """Test that injected tool arguments are filtered from callback inputs."""
+
+    @tool
+    def search_tool(
+        query: str,
+        state: Annotated[dict, InjectedToolArg()],
+    ) -> str:
+        """Search with injected state.
+
+        Args:
+            query: The search query.
+            state: Injected state context.
+        """
+        return f"Results for: {query}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+    result = search_tool.invoke(
+        {"query": "test query", "state": {"user_id": 123}},
+        config={"callbacks": [handler]},
+    )
+
+    assert result == "Results for: test query"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # Verify that injected 'state' arg is filtered out
+    captured = handler.captured_inputs[0]
+    assert captured is not None
+    assert "query" in captured
+    assert "state" not in captured
+    assert captured["query"] == "test query"
+
+
+def test_filter_run_manager_from_callbacks() -> None:
+    """Test that run_manager is filtered from callback inputs."""
+
+    @tool
+    def tool_with_run_manager(
+        message: str,
+        run_manager: CallbackManagerForToolRun | None = None,
+    ) -> str:
+        """Tool with run_manager parameter.
+
+        Args:
+            message: The message to process.
+            run_manager: The callback manager.
+        """
+        return f"Processed: {message}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+    result = tool_with_run_manager.invoke(
+        {"message": "hello"},
+        config={"callbacks": [handler]},
+    )
+
+    assert result == "Processed: hello"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # Verify that run_manager is filtered out
+    captured = handler.captured_inputs[0]
+    assert captured is not None
+    assert "message" in captured
+    assert "run_manager" not in captured
+
+
+def test_filter_multiple_injected_args() -> None:
+    """Test filtering multiple injected arguments from callback inputs."""
+
+    @tool
+    def complex_tool(
+        query: str,
+        limit: int,
+        state: Annotated[dict, InjectedToolArg()],
+        context: Annotated[str, InjectedToolArg()],
+        run_manager: CallbackManagerForToolRun | None = None,
+    ) -> str:
+        """Complex tool with multiple injected args.
+
+        Args:
+            query: The search query.
+            limit: Maximum number of results.
+            state: Injected state.
+            context: Injected context.
+            run_manager: The callback manager.
+        """
+        return f"Query: {query}, Limit: {limit}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+    result = complex_tool.invoke(
+        {
+            "query": "test",
+            "limit": 10,
+            "state": {"foo": "bar"},
+            "context": "some context",
+        },
+        config={"callbacks": [handler]},
+    )
+
+    assert result == "Query: test, Limit: 10"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # Verify that only non-injected args remain
+    captured = handler.captured_inputs[0]
+    assert captured is not None
+    assert captured == {"query": "test", "limit": 10}
+    assert "state" not in captured
+    assert "context" not in captured
+    assert "run_manager" not in captured
+
+
+def test_no_filtering_for_string_input() -> None:
+    """Test that string inputs are not filtered (passed as None)."""
+
+    @tool
+    def simple_tool(query: str) -> str:
+        """Simple tool with string input.
+
+        Args:
+            query: The query string.
+        """
+        return f"Result: {query}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+    result = simple_tool.invoke("test query", config={"callbacks": [handler]})
+
+    assert result == "Result: test query"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # String inputs should result in None for the inputs parameter
+    assert handler.captured_inputs[0] is None
+
+
+async def test_filter_injected_args_async() -> None:
+    """Test that injected args are filtered in async tool execution."""
+
+    @tool
+    async def async_search_tool(
+        query: str,
+        state: Annotated[dict, InjectedToolArg()],
+    ) -> str:
+        """Async search with injected state.
+
+        Args:
+            query: The search query.
+            state: Injected state context.
+        """
+        return f"Async results for: {query}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+    result = await async_search_tool.ainvoke(
+        {"query": "async test", "state": {"user_id": 456}},
+        config={"callbacks": [handler]},
+    )
+
+    assert result == "Async results for: async test"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # Verify filtering in async execution
+    captured = handler.captured_inputs[0]
+    assert captured is not None
+    assert "query" in captured
+    assert "state" not in captured
+    assert captured["query"] == "async test"
+
+
+@pytest.mark.skipif(not HAS_LANGGRAPH, reason="langgraph not installed")
+def test_filter_tool_runtime_directly_injected_arg() -> None:
+    """Test that ToolRuntime (a _DirectlyInjectedToolArg) is filtered."""
+
+    @tool
+    def tool_with_runtime(query: str, limit: int, runtime: ToolRuntime) -> str:
+        """Tool with ToolRuntime parameter.
+
+        Args:
+            query: The search query.
+            limit: Max results.
+            runtime: The tool runtime (directly injected).
+        """
+        return f"Query: {query}, Limit: {limit}"
+
+    handler = CallbackHandlerWithInputCapture(captured_inputs=[])
+
+    # Create a mock ToolRuntime instance
+    class MockRuntime:
+        """Mock ToolRuntime for testing."""
+
+        agent_name = "test_agent"
+        context: dict[str, Any] = {}
+        state: dict[str, Any] = {}
+
+    result = tool_with_runtime.invoke(
+        {
+            "query": "test",
+            "limit": 5,
+            "runtime": MockRuntime(),
+        },
+        config={"callbacks": [handler]},
+    )
+
+    assert result == "Query: test, Limit: 5"
+    assert handler.tool_starts == 1
+    assert len(handler.captured_inputs) == 1
+
+    # Verify that ToolRuntime is filtered out
+    captured = handler.captured_inputs[0]
+    assert captured is not None
+    assert captured == {"query": "test", "limit": 5}
+    assert "runtime" not in captured

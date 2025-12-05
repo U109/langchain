@@ -8,7 +8,6 @@ import logging
 import types
 import typing
 import uuid
-from collections.abc import Callable
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -33,6 +32,8 @@ from langchain_core.utils.json_schema import dereference_refs
 from langchain_core.utils.pydantic import is_basemodel_subclass
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def _convert_json_schema_to_openai_function(
             used.
         description: The description of the function. If not provided, the description
             of the schema will be used.
-        rm_titles: Whether to remove titles from the schema. Defaults to `True`.
+        rm_titles: Whether to remove titles from the schema.
 
     Returns:
         The function description.
@@ -148,7 +149,7 @@ def _convert_pydantic_to_openai_function(
             used.
         description: The description of the function. If not provided, the description
             of the schema will be used.
-        rm_titles: Whether to remove titles from the schema. Defaults to `True`.
+        rm_titles: Whether to remove titles from the schema.
 
     Raises:
         TypeError: If the model is not a Pydantic model.
@@ -334,11 +335,11 @@ def convert_to_openai_function(
 
     Args:
         function:
-            A dictionary, Pydantic BaseModel class, TypedDict class, a LangChain
-            Tool object, or a Python function. If a dictionary is passed in, it is
+            A dictionary, Pydantic `BaseModel` class, `TypedDict` class, a LangChain
+            `Tool` object, or a Python function. If a dictionary is passed in, it is
             assumed to already be a valid OpenAI function, a JSON schema with
-            top-level 'title' key specified, an Anthropic format
-            tool, or an Amazon Bedrock Converse format tool.
+            top-level `title` key specified, an Anthropic format tool, or an Amazon
+            Bedrock Converse format tool.
         strict:
             If `True`, model output is guaranteed to exactly match the JSON Schema
             provided in the function definition. If `None`, `strict` argument will not
@@ -351,17 +352,9 @@ def convert_to_openai_function(
     Raises:
         ValueError: If function is not in a supported format.
 
-    !!! warning "Behavior changed in 0.2.29"
-        `strict` arg added.
+    !!! warning "Behavior changed in `langchain-core` 0.3.16"
 
-    !!! warning "Behavior changed in 0.3.13"
-        Support for Anthropic format tools added.
-
-    !!! warning "Behavior changed in 0.3.14"
-        Support for Amazon Bedrock Converse format tools added.
-
-    !!! warning "Behavior changed in 0.3.16"
-        'description' and 'parameters' keys are now optional. Only 'name' is
+        `description` and `parameters` keys are now optional. Only `name` is
         required and guaranteed to be part of the output.
     """
     # an Anthropic format tool
@@ -421,7 +414,7 @@ def convert_to_openai_function(
     if strict is not None:
         if "strict" in oai_function and oai_function["strict"] != strict:
             msg = (
-                f"Tool/function already has a 'strict' key wth value "
+                f"Tool/function already has a 'strict' key with value "
                 f"{oai_function['strict']} which is different from the explicit "
                 f"`strict` arg received {strict=}."
             )
@@ -434,6 +427,14 @@ def convert_to_openai_function(
             oai_function["parameters"] = _recursive_set_additional_properties_false(
                 oai_function["parameters"]
             )
+            # All fields must be `required`
+            parameters = oai_function.get("parameters")
+            if isinstance(parameters, dict):
+                fields = parameters.get("properties")
+                if isinstance(fields, dict) and fields:
+                    parameters = dict(parameters)
+                    parameters["required"] = list(fields.keys())
+                    oai_function["parameters"] = parameters
     return oai_function
 
 
@@ -459,16 +460,14 @@ def convert_to_openai_tool(
 ) -> dict[str, Any]:
     """Convert a tool-like object to an OpenAI tool schema.
 
-    OpenAI tool schema reference:
-    https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools
+    [OpenAI tool schema reference](https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools)
 
     Args:
         tool:
-            Either a dictionary, a pydantic.BaseModel class, Python function, or
-            BaseTool. If a dictionary is passed in, it is
-            assumed to already be a valid OpenAI function, a JSON schema with
-            top-level 'title' key specified, an Anthropic format
-            tool, or an Amazon Bedrock Converse format tool.
+            Either a dictionary, a `pydantic.BaseModel` class, Python function, or
+            `BaseTool`. If a dictionary is passed in, it is assumed to already be a
+            valid OpenAI function, a JSON schema with top-level `title` key specified,
+            an Anthropic format tool, or an Amazon Bedrock Converse format tool.
         strict:
             If `True`, model output is guaranteed to exactly match the JSON Schema
             provided in the function definition. If `None`, `strict` argument will not
@@ -478,28 +477,19 @@ def convert_to_openai_tool(
         A dict version of the passed in tool which is compatible with the
         OpenAI tool-calling API.
 
-    !!! warning "Behavior changed in 0.2.29"
-        `strict` arg added.
+    !!! warning "Behavior changed in `langchain-core` 0.3.16"
 
-    !!! warning "Behavior changed in 0.3.13"
-        Support for Anthropic format tools added.
-
-    !!! warning "Behavior changed in 0.3.14"
-        Support for Amazon Bedrock Converse format tools added.
-
-    !!! warning "Behavior changed in 0.3.16"
-        'description' and 'parameters' keys are now optional. Only 'name' is
+        `description` and `parameters` keys are now optional. Only `name` is
         required and guaranteed to be part of the output.
 
-    !!! warning "Behavior changed in 0.3.44"
+    !!! warning "Behavior changed in `langchain-core` 0.3.44"
+
         Return OpenAI Responses API-style tools unchanged. This includes
-        any dict with "type" in "file_search", "function", "computer_use_preview",
-        "web_search_preview".
+        any dict with `"type"` in `"file_search"`, `"function"`,
+        `"computer_use_preview"`, `"web_search_preview"`.
 
-    !!! warning "Behavior changed in 0.3.61"
-        Added support for OpenAI's built-in code interpreter and remote MCP tools.
+    !!! warning "Behavior changed in `langchain-core` 0.3.63"
 
-    !!! warning "Behavior changed in 0.3.63"
         Added support for OpenAI's image generation built-in tool.
     """
     # Import locally to prevent circular import
@@ -668,6 +658,9 @@ def tool_example_to_messages(
     return messages
 
 
+_MIN_DOCSTRING_BLOCKS = 2
+
+
 def _parse_google_docstring(
     docstring: str | None,
     args: list[str],
@@ -686,7 +679,7 @@ def _parse_google_docstring(
                 arg for arg in args if arg not in {"run_manager", "callbacks", "return"}
             }
             if filtered_annotations and (
-                len(docstring_blocks) < 2
+                len(docstring_blocks) < _MIN_DOCSTRING_BLOCKS
                 or not any(block.startswith("Args:") for block in docstring_blocks[1:])
             ):
                 msg = "Found invalid Google-Style docstring."

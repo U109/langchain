@@ -13,7 +13,11 @@ from langchain_core.callbacks.manager import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain_core.language_models import LanguageModelInput
+from langchain_core.language_models import (
+    LanguageModelInput,
+    ModelProfile,
+    ModelProfileRegistry,
+)
 from langchain_core.language_models.chat_models import (
     BaseChatModel,
     agenerate_from_stream,
@@ -61,8 +65,16 @@ from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
+from langchain_huggingface.data._profiles import _PROFILES
 from langchain_huggingface.llms.huggingface_endpoint import HuggingFaceEndpoint
 from langchain_huggingface.llms.huggingface_pipeline import HuggingFacePipeline
+
+_MODEL_PROFILES = cast("ModelProfileRegistry", _PROFILES)
+
+
+def _get_default_model_profile(model_name: str) -> ModelProfile:
+    default = _MODEL_PROFILES.get(model_name) or {}
+    return default.copy()
 
 
 @dataclass
@@ -330,18 +342,17 @@ class ChatHuggingFace(BaseChatModel):
         ```
 
     Key init args — completion params:
-        llm: `HuggingFaceTextGenInference`, `HuggingFaceEndpoint`, `HuggingFaceHub`, or
-            'HuggingFacePipeline' LLM to be used.
+        llm:
+            LLM to be used.
 
     Key init args — client params:
-        custom_get_token_ids: Callable[[str], list[int]] | None
+        custom_get_token_ids:
             Optional encoder to use for counting tokens.
-        metadata: dict[str, Any] | None
+        metadata:
             Metadata to add to the run trace.
-        tags: list[str] | None
+        tags:
             Tags to add to the run trace.
-        tokenizer: Any
-        verbose: bool
+        verbose:
             Whether to print out response text.
 
     See full list of supported init args and their descriptions in the params
@@ -500,6 +511,9 @@ class ChatHuggingFace(BaseChatModel):
     """Modify the likelihood of specified tokens appearing in the completion."""
     streaming: bool = False
     """Whether to stream the results or not."""
+    stream_usage: bool | None = None
+    """Whether to include usage metadata in streaming output. If True, an additional
+    message chunk will be generated during the stream including usage metadata."""
     n: int | None = None
     """Number of chat completions to generate for each prompt."""
     top_p: float | None = None
@@ -511,7 +525,56 @@ class ChatHuggingFace(BaseChatModel):
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
+
+        # Inherit properties from the LLM if they weren't explicitly set
+        self._inherit_llm_properties()
+
         self._resolve_model_id()
+
+    def _inherit_llm_properties(self) -> None:
+        """Inherit properties from the wrapped LLM instance if not explicitly set."""
+        if not hasattr(self, "llm") or self.llm is None:
+            return
+
+        # Map of ChatHuggingFace properties to LLM properties
+        property_mappings = {
+            "temperature": "temperature",
+            "max_tokens": "max_new_tokens",  # Different naming convention
+            "top_p": "top_p",
+            "seed": "seed",
+            "streaming": "streaming",
+            "stop": "stop_sequences",
+        }
+
+        # Inherit properties from LLM and not explicitly set here
+        for chat_prop, llm_prop in property_mappings.items():
+            if hasattr(self.llm, llm_prop):
+                llm_value = getattr(self.llm, llm_prop)
+                chat_value = getattr(self, chat_prop, None)
+                if not chat_value and llm_value:
+                    setattr(self, chat_prop, llm_value)
+
+        # Handle special cases for HuggingFaceEndpoint
+        if _is_huggingface_endpoint(self.llm):
+            # Inherit additional HuggingFaceEndpoint specific properties
+            endpoint_mappings = {
+                "frequency_penalty": "repetition_penalty",
+            }
+
+            for chat_prop, llm_prop in endpoint_mappings.items():
+                if hasattr(self.llm, llm_prop):
+                    llm_value = getattr(self.llm, llm_prop)
+                    chat_value = getattr(self, chat_prop, None)
+                    if chat_value is None and llm_value is not None:
+                        setattr(self, chat_prop, llm_value)
+
+        # Inherit model_kwargs if not explicitly set
+        if (
+            not self.model_kwargs
+            and hasattr(self.llm, "model_kwargs")
+            and isinstance(self.llm.model_kwargs, dict)
+        ):
+            self.model_kwargs = self.llm.model_kwargs.copy()
 
     @model_validator(mode="after")
     def validate_llm(self) -> Self:
@@ -527,6 +590,13 @@ class ChatHuggingFace(BaseChatModel):
                 f"received {type(self.llm)}"
             )
             raise TypeError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _set_model_profile(self) -> Self:
+        """Set model profile if not overridden."""
+        if self.profile is None and self.model_id:
+            self.profile = _get_default_model_profile(self.model_id)
         return self
 
     def _create_chat_result(self, response: dict) -> ChatResult:
@@ -635,14 +705,40 @@ class ChatHuggingFace(BaseChatModel):
         )
         return self._to_chat_result(llm_result)
 
+    def _should_stream_usage(
+        self, *, stream_usage: bool | None = None, **kwargs: Any
+    ) -> bool | None:
+        """Determine whether to include usage metadata in streaming output.
+
+        For backwards compatibility, we check for `stream_options` passed
+        explicitly to kwargs or in the model_kwargs and override self.stream_usage.
+        """
+        stream_usage_sources = [  # order of precedence
+            stream_usage,
+            kwargs.get("stream_options", {}).get("include_usage"),
+            self.model_kwargs.get("stream_options", {}).get("include_usage"),
+            self.stream_usage,
+        ]
+        for source in stream_usage_sources:
+            if isinstance(source, bool):
+                return source
+        return self.stream_usage
+
     def _stream(
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
         run_manager: CallbackManagerForLLMRun | None = None,
+        *,
+        stream_usage: bool | None = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         if _is_huggingface_endpoint(self.llm):
+            stream_usage = self._should_stream_usage(
+                stream_usage=stream_usage, **kwargs
+            )
+            if stream_usage:
+                kwargs["stream_options"] = {"include_usage": stream_usage}
             message_dicts, params = self._create_message_dicts(messages, stop)
             params = {**params, **kwargs, "stream": True}
 
@@ -651,7 +747,20 @@ class ChatHuggingFace(BaseChatModel):
                 messages=message_dicts, **params
             ):
                 if len(chunk["choices"]) == 0:
+                    if usage := chunk.get("usage"):
+                        usage_msg = AIMessageChunk(
+                            content="",
+                            additional_kwargs={},
+                            response_metadata={},
+                            usage_metadata={
+                                "input_tokens": usage.get("prompt_tokens", 0),
+                                "output_tokens": usage.get("completion_tokens", 0),
+                                "total_tokens": usage.get("total_tokens", 0),
+                            },
+                        )
+                        yield ChatGenerationChunk(message=usage_msg)
                     continue
+
                 choice = chunk["choices"][0]
                 message_chunk = _convert_chunk_to_message_chunk(
                     chunk, default_chunk_class
@@ -689,8 +798,13 @@ class ChatHuggingFace(BaseChatModel):
         messages: list[BaseMessage],
         stop: list[str] | None = None,
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        *,
+        stream_usage: bool | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
+        stream_usage = self._should_stream_usage(stream_usage=stream_usage, **kwargs)
+        if stream_usage:
+            kwargs["stream_options"] = {"include_usage": stream_usage}
         message_dicts, params = self._create_message_dicts(messages, stop)
         params = {**params, **kwargs, "stream": True}
 
@@ -700,7 +814,20 @@ class ChatHuggingFace(BaseChatModel):
             messages=message_dicts, **params
         ):
             if len(chunk["choices"]) == 0:
+                if usage := chunk.get("usage"):
+                    usage_msg = AIMessageChunk(
+                        content="",
+                        additional_kwargs={},
+                        response_metadata={},
+                        usage_metadata={
+                            "input_tokens": usage.get("prompt_tokens", 0),
+                            "output_tokens": usage.get("completion_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
+                        },
+                    )
+                    yield ChatGenerationChunk(message=usage_msg)
                 continue
+
             choice = chunk["choices"][0]
             message_chunk = _convert_chunk_to_message_chunk(chunk, default_chunk_class)
             generation_info = {}
@@ -881,9 +1008,9 @@ class ChatHuggingFace(BaseChatModel):
         Args:
             schema: The output schema. Can be passed in as:
 
-                - an OpenAI function/tool schema,
-                - a JSON Schema,
-                - a typedDict class (support added in 0.1.7),
+                - An OpenAI function/tool schema,
+                - A JSON Schema,
+                - A `TypedDict` class
 
                 Pydantic class is currently supported.
 
@@ -894,12 +1021,18 @@ class ChatHuggingFace(BaseChatModel):
                 - `'json_mode'`: uses JSON mode.
 
             include_raw:
-                If `False` then only the parsed structured output is returned. If
-                an error occurs during model output parsing it will be raised. If `True`
-                then both the raw model response (a BaseMessage) and the parsed model
-                response will be returned. If an error occurs during output parsing it
-                will be caught and returned as well. The final output is always a dict
-                with keys `'raw'`, `'parsed'`, and `'parsing_error'`.
+                If `False` then only the parsed structured output is returned.
+
+                If an error occurs during model output parsing it will be raised.
+
+                If `True` then both the raw model response (a `BaseMessage`) and the
+                parsed model response will be returned.
+
+                If an error occurs during output parsing it will be caught and returned
+                as well.
+
+                The final output is always a `dict` with keys `'raw'`, `'parsed'`, and
+                `'parsing_error'`.
 
             kwargs:
                 Additional parameters to pass to the underlying LLM's
@@ -907,20 +1040,19 @@ class ChatHuggingFace(BaseChatModel):
                 method, such as `response_format` or `ls_structured_output_format`.
 
         Returns:
-            A Runnable that takes same inputs as a `langchain_core.language_models.chat.BaseChatModel`.
+            A `Runnable` that takes same inputs as a
+                `langchain_core.language_models.chat.BaseChatModel`. If `include_raw` is
+                `False` and `schema` is a Pydantic class, `Runnable` outputs an instance
+                of `schema` (i.e., a Pydantic object). Otherwise, if `include_raw` is
+                `False` then `Runnable` outputs a `dict`.
 
-            If `include_raw` is False and `schema` is a Pydantic class, Runnable outputs
-            an instance of `schema` (i.e., a Pydantic object).
+                If `include_raw` is `True`, then `Runnable` outputs a `dict` with keys:
 
-            Otherwise, if `include_raw` is False then Runnable outputs a dict.
-
-            If `include_raw` is True, then Runnable outputs a dict with keys:
-
-            - `'raw'`: BaseMessage
-            - `'parsed'`: None if there was a parsing error, otherwise the type depends on the `schema` as described above.
-            - `'parsing_error'`: BaseException | None
-
-        """  # noqa: E501
+                - `'raw'`: `BaseMessage`
+                - `'parsed'`: `None` if there was a parsing error, otherwise the type
+                    depends on the `schema` as described above.
+                - `'parsing_error'`: `BaseException | None`
+        """
         _ = kwargs.pop("strict", None)
         if kwargs:
             msg = f"Received unsupported arguments {kwargs}"

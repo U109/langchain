@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain_core.language_models._utils import (
@@ -14,6 +13,8 @@ from langchain_core.language_models._utils import (
 from langchain_core.messages import content as types
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from langchain_core.messages import AIMessage, AIMessageChunk
 
 
@@ -155,7 +156,7 @@ def _convert_to_v1_from_chat_completions_input(
 ) -> list[types.ContentBlock]:
     """Convert OpenAI Chat Completions format blocks to v1 format.
 
-    During the `.content_blocks` parsing process, we wrap blocks not recognized as a v1
+    During the `content_blocks` parsing process, we wrap blocks not recognized as a v1
     block as a `'non_standard'` block with the original block stored in the `value`
     field. This function attempts to unpack those blocks and convert any blocks that
     might be OpenAI format to v1 ContentBlocks.
